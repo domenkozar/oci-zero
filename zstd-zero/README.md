@@ -14,11 +14,19 @@ It requires Rust 1.75 or newer and contains no unsafe code
 zstd-zero = "0.1"
 ```
 
-The caller supplies three reusable buffers:
+The caller supplies five reusable buffers:
 
 - history at least as large as the frame's declared window;
 - compressed-block scratch, up to 128 KiB;
-- regenerated-literals scratch, up to 128 KiB.
+- regenerated-literals scratch, up to 128 KiB;
+- `FSE_ENTRIES` initialized `FseEntry` slots for sequence tables and Huffman weight scratch;
+- `HUFFMAN_ENTRIES` initialized `HuffmanEntry` slots for the literal table.
+
+Entropy tables borrow these buffers instead of living inside `Decoder` or in
+large temporary stack arrays. Use `Default` for heap-backed entries or the const
+`FseEntry::new()` / `HuffmanEntry::new()` constructors for static arrays.
+`Decoder::new` and `Decoder::with_options` return an error if either table buffer
+is too short. Reset retains the buffers and invalidates the previous tables.
 
 Decoded bytes are returned as short-lived slices borrowed directly from the
 history buffer. Dictionary, legacy, and magicless frames are not supported.
@@ -30,11 +38,15 @@ use zstd_zero::{DecodeStep, Decoder, DecoderBuffers, MAX_BLOCK_SIZE};
 let mut history = [0u8; 8 * 1024];
 let mut block = [0u8; MAX_BLOCK_SIZE];
 let mut literals = [0u8; MAX_BLOCK_SIZE];
+let mut fse = vec![zstd_zero::FseEntry::default(); zstd_zero::FSE_ENTRIES];
+let mut huffman = vec![zstd_zero::HuffmanEntry::default(); zstd_zero::HUFFMAN_ENTRIES];
 let mut decoder = Decoder::new(DecoderBuffers {
     history: &mut history,
     block: &mut block,
     literals: &mut literals,
-});
+    fse: &mut fse,
+    huffman: &mut huffman,
+}).unwrap();
 
 // Feed arbitrary input fragments. Every step reports how much input it used;
 // consume an Output slice before calling the decoder again.

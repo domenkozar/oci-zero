@@ -17,6 +17,13 @@ use fse::Table as FseTable;
 use huffman::Table as HuffmanTable;
 use xxhash::XxHash64;
 
+pub use fse::Entry as FseEntry;
+pub use huffman::Entry as HuffmanEntry;
+/// FSE slots required for three sequence tables and Huffman weight scratch.
+pub const FSE_ENTRIES: usize = 4 * 512;
+/// Huffman slots required for literal decoding.
+pub const HUFFMAN_ENTRIES: usize = 2048;
+
 pub const MAX_BLOCK_SIZE: usize = 128 * 1024;
 pub const MAX_FRAME_HEADER_SIZE: usize = 18;
 
@@ -119,7 +126,12 @@ enum InternalStep {
     },
 }
 
+/// Initialized caller-owned storage, retained for the decoder's lifetime.
 pub struct DecoderBuffers<'a> {
+    /// At least [`FSE_ENTRIES`] entries, including Huffman weight scratch.
+    pub fse: &'a mut [FseEntry],
+    /// At least [`HUFFMAN_ENTRIES`] entries.
+    pub huffman: &'a mut [HuffmanEntry],
     pub history: &'a mut [u8],
     pub block: &'a mut [u8],
     pub literals: &'a mut [u8],
@@ -208,21 +220,34 @@ pub struct Decoder<'a> {
     pending_len: usize,
     offsets: [u32; 3],
     checksum: XxHash64,
-    huffman: HuffmanTable,
-    literal_lengths: FseTable,
-    offsets_table: FseTable,
-    match_lengths: FseTable,
+    huffman: HuffmanTable<'a>,
+    literal_lengths: FseTable<'a>,
+    offsets_table: FseTable<'a>,
+    match_lengths: FseTable<'a>,
 }
 
 impl<'a> Decoder<'a> {
     /// Create a decoder with every validation check enabled.
-    pub fn new(buffers: DecoderBuffers<'a>) -> Self {
+    ///
+    /// Returns [`DecodeError::InvalidEntropyTable`] if entropy storage is too short.
+    pub fn new(buffers: DecoderBuffers<'a>) -> Result<Self, DecodeError> {
         Self::with_options(buffers, DecoderOptions::default())
     }
 
     /// Create a decoder with explicit [`DecoderOptions`].
-    pub fn with_options(buffers: DecoderBuffers<'a>, options: DecoderOptions) -> Self {
-        Self {
+    ///
+    /// Returns [`DecodeError::InvalidEntropyTable`] if entropy storage is too short.
+    pub fn with_options(
+        buffers: DecoderBuffers<'a>,
+        options: DecoderOptions,
+    ) -> Result<Self, DecodeError> {
+        if buffers.fse.len() < FSE_ENTRIES || buffers.huffman.len() < HUFFMAN_ENTRIES {
+            return Err(DecodeError::InvalidEntropyTable);
+        }
+        let (scratch, rest) = buffers.fse[..FSE_ENTRIES].split_at_mut(512);
+        let (literal, rest) = rest.split_at_mut(512);
+        let (offsets, matches) = rest.split_at_mut(512);
+        Ok(Self {
             options,
             history: buffers.history,
             block: buffers.block,
@@ -243,11 +268,14 @@ impl<'a> Decoder<'a> {
             pending_len: 0,
             offsets: [1, 4, 8],
             checksum: XxHash64::new(),
-            huffman: HuffmanTable::new(),
-            literal_lengths: FseTable::new(),
-            offsets_table: FseTable::new(),
-            match_lengths: FseTable::new(),
-        }
+            huffman: HuffmanTable::new(
+                &mut buffers.huffman[..HUFFMAN_ENTRIES],
+                FseTable::new(scratch),
+            ),
+            literal_lengths: FseTable::new(literal),
+            offsets_table: FseTable::new(offsets),
+            match_lengths: FseTable::new(matches),
+        })
     }
 
     pub fn decode<'decoder>(
@@ -376,10 +404,10 @@ impl<'a> Decoder<'a> {
         self.pending_len = 0;
         self.offsets = [1, 4, 8];
         self.checksum = XxHash64::new();
-        self.huffman = HuffmanTable::new();
-        self.literal_lengths = FseTable::new();
-        self.offsets_table = FseTable::new();
-        self.match_lengths = FseTable::new();
+        self.huffman.reset();
+        self.literal_lengths.reset();
+        self.offsets_table.reset();
+        self.match_lengths.reset();
     }
 
     fn decode_inner(&mut self, input: &[u8]) -> Result<InternalStep, DecodeError> {
@@ -561,10 +589,10 @@ impl<'a> Decoder<'a> {
         self.pending_len = 0;
         self.offsets = [1, 4, 8];
         self.checksum = XxHash64::new();
-        self.huffman = HuffmanTable::new();
-        self.literal_lengths = FseTable::new();
-        self.offsets_table = FseTable::new();
-        self.match_lengths = FseTable::new();
+        self.huffman.reset();
+        self.literal_lengths.reset();
+        self.offsets_table.reset();
+        self.match_lengths.reset();
         Ok(())
     }
 
@@ -907,7 +935,7 @@ fn parse_block_header(bytes: [u8; 3], limit: usize) -> Result<BlockHeader, Decod
 fn decode_literals(
     input: &[u8],
     output: &mut [u8],
-    table: &mut HuffmanTable,
+    table: &mut HuffmanTable<'_>,
     block_limit: usize,
     strict: bool,
 ) -> Result<(usize, usize), DecodeError> {
@@ -1043,7 +1071,7 @@ fn parse_sequence_count(input: &[u8]) -> Result<(usize, usize), DecodeError> {
 }
 
 fn build_sequence_table(
-    table: &mut FseTable,
+    table: &mut FseTable<'_>,
     mode: u8,
     input: &[u8],
     predefined: &[i16],
@@ -1169,7 +1197,7 @@ const OF_DEFAULT: [i16; 29] = [
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use crate::*;
     use std::vec::Vec;
 
     #[test]
@@ -1199,11 +1227,16 @@ mod tests {
         let mut history = [0u8; 5];
         let mut block = [0u8; 5];
         let mut literals = [0u8; 5];
+        let mut fse = std::vec![FseEntry::default(); FSE_ENTRIES];
+        let mut huffman = std::vec![HuffmanEntry::default(); HUFFMAN_ENTRIES];
         let mut decoder = Decoder::new(DecoderBuffers {
+            fse: &mut fse,
+            huffman: &mut huffman,
             history: &mut history,
             block: &mut block,
             literals: &mut literals,
-        });
+        })
+        .unwrap();
         let mut input = &frame[..];
         let mut output = [0u8; 5];
         let mut output_len = 0;
@@ -1232,11 +1265,16 @@ mod tests {
         let mut history = [0u8; 5];
         let mut block = [0u8; 5];
         let mut literals = [0u8; 5];
+        let mut fse = std::vec![FseEntry::default(); FSE_ENTRIES];
+        let mut huffman = std::vec![HuffmanEntry::default(); HUFFMAN_ENTRIES];
         let mut decoder = Decoder::new(DecoderBuffers {
+            fse: &mut fse,
+            huffman: &mut huffman,
             history: &mut history,
             block: &mut block,
             literals: &mut literals,
-        });
+        })
+        .unwrap();
         let mut output = Vec::new();
         for fragment in frame.chunks(2) {
             decoder
@@ -1265,11 +1303,16 @@ mod tests {
         let mut history = [0u8; 10];
         let mut block = [0u8; 1];
         let mut literals = [];
+        let mut fse = std::vec![FseEntry::default(); FSE_ENTRIES];
+        let mut huffman = std::vec![HuffmanEntry::default(); HUFFMAN_ENTRIES];
         let mut decoder = Decoder::new(DecoderBuffers {
+            fse: &mut fse,
+            huffman: &mut huffman,
             history: &mut history,
             block: &mut block,
             literals: &mut literals,
-        });
+        })
+        .unwrap();
         let mut input = rle.as_slice();
         let mut output = [0u8; 10];
         let mut position = 0;
@@ -1294,11 +1337,16 @@ mod tests {
         let mut history = [];
         let mut block = [];
         let mut literals = [];
+        let mut fse = std::vec![FseEntry::default(); FSE_ENTRIES];
+        let mut huffman = std::vec![HuffmanEntry::default(); HUFFMAN_ENTRIES];
         let mut decoder = Decoder::new(DecoderBuffers {
+            fse: &mut fse,
+            huffman: &mut huffman,
             history: &mut history,
             block: &mut block,
             literals: &mut literals,
-        });
+        })
+        .unwrap();
         let mut input = empty.as_slice();
         loop {
             let step = decoder.decode(input).unwrap();
@@ -1309,5 +1357,30 @@ mod tests {
             }
         }
         decoder.finish().unwrap();
+    }
+}
+
+#[cfg(test)]
+mod workspace_tests {
+    use crate::*;
+    #[test]
+    fn short_table_storage_is_rejected_without_panicking() {
+        for (fse_len, huffman_len) in [
+            (0, HUFFMAN_ENTRIES),
+            (FSE_ENTRIES, 0),
+            (FSE_ENTRIES - 1, HUFFMAN_ENTRIES),
+            (FSE_ENTRIES, HUFFMAN_ENTRIES - 1),
+        ] {
+            let mut fse = std::vec![FseEntry::default(); fse_len];
+            let mut huffman = std::vec![HuffmanEntry::default(); huffman_len];
+            let result = Decoder::new(DecoderBuffers {
+                history: &mut [],
+                block: &mut [],
+                literals: &mut [],
+                fse: &mut fse,
+                huffman: &mut huffman,
+            });
+            assert!(matches!(result, Err(DecodeError::InvalidEntropyTable)));
+        }
     }
 }

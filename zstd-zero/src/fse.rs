@@ -2,35 +2,48 @@ use crate::bitstream::{BackwardBits, ForwardBits};
 use crate::DecodeError;
 
 pub(crate) const MAX_TABLE_LOG: u8 = 9;
-const MAX_TABLE_SIZE: usize = 1 << MAX_TABLE_LOG;
 const MAX_SYMBOLS: usize = 256;
 
+/// An initialized entropy-table slot; the decoder manages its contents.
 #[derive(Clone, Copy, Debug, Default)]
-pub(crate) struct Entry {
+pub struct Entry {
     pub(crate) baseline: u16,
     pub(crate) bits: u8,
     pub(crate) symbol: u8,
 }
 
-pub(crate) struct Table {
-    entries: [Entry; MAX_TABLE_SIZE],
+impl Entry {
+    /// Create an empty slot, including for statically allocated workspaces.
+    pub const fn new() -> Self {
+        Self {
+            baseline: 0,
+            bits: 0,
+            symbol: 0,
+        }
+    }
+}
+
+pub(crate) struct Table<'a> {
+    entries: &'a mut [Entry],
     len: usize,
     log: u8,
     valid: bool,
 }
 
-impl Table {
-    pub(crate) const fn new() -> Self {
+impl<'a> Table<'a> {
+    pub(crate) fn new(entries: &'a mut [Entry]) -> Self {
         Self {
-            entries: [Entry {
-                baseline: 0,
-                bits: 0,
-                symbol: 0,
-            }; MAX_TABLE_SIZE],
+            entries,
             len: 0,
             log: 0,
             valid: false,
         }
+    }
+
+    pub(crate) fn reset(&mut self) {
+        self.len = 0;
+        self.log = 0;
+        self.valid = false;
     }
 
     pub(crate) fn is_valid(&self) -> bool {
