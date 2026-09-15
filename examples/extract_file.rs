@@ -36,6 +36,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let mut history = vec![0u8; HISTORY_SIZE];
     let mut block = vec![0u8; MAX_BLOCK_SIZE];
     let mut literals = vec![0u8; MAX_BLOCK_SIZE];
+    let mut fse_scratch = [0i16; oci_zero::compression::zstd::FSE_SCRATCH_LEN];
     let mut fse = vec![
         oci_zero::compression::zstd::FseEntry::default();
         oci_zero::compression::zstd::FSE_ENTRIES
@@ -48,6 +49,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         history: &mut history,
         block: &mut block,
         literals: &mut literals,
+        fse_scratch: &mut fse_scratch,
         fse: &mut fse,
         huffman: &mut huffman,
     })

@@ -45,7 +45,11 @@ impl<'a> Table<'a> {
         self.valid
     }
 
-    pub(crate) fn read_description(&mut self, input: &[u8]) -> Result<usize, DecodeError> {
+    pub(crate) fn read_description(
+        &mut self,
+        input: &[u8],
+        fse_scratch: &mut [i16],
+    ) -> Result<usize, DecodeError> {
         let header = *input.first().ok_or(DecodeError::InvalidEntropyTable)?;
         let mut weights = [0u8; 256];
         let (weight_count, consumed) = if header < 128 {
@@ -57,6 +61,7 @@ impl<'a> Table<'a> {
                 &input[1..1 + compressed_size],
                 &mut weights,
                 &mut self.scratch,
+                fse_scratch,
             )?;
             (count, 1 + compressed_size)
         } else {
@@ -244,9 +249,10 @@ fn decode_compressed_weights(
     input: &[u8],
     output: &mut [u8; 256],
     table: &mut FseTable<'_>,
+    scratch: &mut [i16],
 ) -> Result<usize, DecodeError> {
     table.reset();
-    let description_size = table.read_description(input, 12, 6)?;
+    let description_size = table.read_description(input, 12, 6, scratch)?;
     if description_size >= input.len() {
         return Err(DecodeError::InvalidEntropyTable);
     }

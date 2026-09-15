@@ -21,6 +21,7 @@ fn decode_with(
     let mut history = vec![0u8; history_size];
     let mut block = vec![0u8; MAX_BLOCK_SIZE];
     let mut literals = vec![0u8; MAX_BLOCK_SIZE];
+    let mut fse_scratch = [0i16; zstd_zero::FSE_SCRATCH_LEN];
     let mut fse = vec![zstd_zero::FseEntry::default(); zstd_zero::FSE_ENTRIES];
     let mut huffman = vec![zstd_zero::HuffmanEntry::default(); zstd_zero::HUFFMAN_ENTRIES];
     let mut decoder = Decoder::with_options(
@@ -28,6 +29,7 @@ fn decode_with(
             history: &mut history,
             block: &mut block,
             literals: &mut literals,
+            fse_scratch: &mut fse_scratch,
             fse: &mut fse,
             huffman: &mut huffman,
         },
